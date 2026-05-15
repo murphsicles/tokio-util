@@ -1,0 +1,13 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/codec/encoder.rs
+
+use bytes::BytesMut;
+use std::io;
+/// Trait of helper objects to write out messages as bytes, for use with
+/// [`FramedWrite`].
+/// 
+/// [`FramedWrite`]: crate::codec::FramedWrite
+pub trait Encoder<Item> {
+ type Error;
+ fn encode(&mut self, item: Item, dst: &mut BytesMut) -> Result<(), Self::Error>
+}
+

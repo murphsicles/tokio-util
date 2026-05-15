@@ -1,0 +1,45 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/context.rs
+
+use pin_project_lite::pin_project;
+use std::{ future::Future, pin::Pin, task::{ Context, Poll } };
+use tokio::runtime::{ Handle, Runtime };
+pin_project ! { #[doc = " `TokioContext` allows running futures that must be inside Tokio's"] #[doc = " context on a non-Tokio runtime."] #[doc = ""] #[doc = " It contains a [`Handle`] to the runtime. A handle to the runtime can be"] #[doc = " obtain by calling the [`Runtime::handle()`] method."] #[doc = ""] #[doc = " Note that the `TokioContext` wrapper only works if the `Runtime` it is"] #[doc = " connected to has not yet been destroyed. You must keep the `Runtime`"] #[doc = " alive until the future has finished executing."] #[doc = ""] #[doc = " **Warning:**If `TokioContext` is used together with a [current thread]"] #[doc = " runtime, that runtime must be inside a call to `block_on` for the"] #[doc = " wrapped future to work. For this reason, it is recommended to use a"] #[doc = " [multi thread] runtime, even if you configure it to only spawn one"] #[doc = " worker thread."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " This example creates two runtimes, but only [enables time] on one of"] #[doc = " them. It then uses the context of the runtime with the timer enabled to"] #[doc = " execute a [`sleep`] future on the runtime with timing disabled."] #[doc = " ```"] #[doc = " # #[cfg(not(target_family = \"wasm\"))]"] #[doc = " # {"] #[doc = " use tokio::time::{sleep, Duration};"] #[doc = " use tokio_util::context::RuntimeExt;"] #[doc = ""] #[doc = " // This runtime has timers enabled."] #[doc = " let rt = tokio::runtime::Builder::new_multi_thread()"] #[doc = " .enable_all()"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = ""] #[doc = " // This runtime has timers disabled."] #[doc = " let rt2 = tokio::runtime::Builder::new_multi_thread()"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = ""] #[doc = " // Wrap the sleep future in the context of rt."] #[doc = " let fut = rt.wrap(async { sleep(Duration::from_millis(2)).await });"] #[doc = ""] #[doc = " // Execute the future on rt2."] #[doc = " rt2.block_on(fut);"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`Handle`]: struct@tokio::runtime::Handle"] #[doc = " [`Runtime::handle()`]: fn@tokio::runtime::Runtime::handle"] #[doc = " [`RuntimeExt`]: trait@crate::context::RuntimeExt"] #[doc = " [`new_static`]: fn@Self::new_static"] #[doc = " [`sleep`]: fn@tokio::time::sleep"] #[doc = " [current thread]: fn@tokio::runtime::Builder::new_current_thread"] #[doc = " [enables time]: fn@tokio::runtime::Builder::enable_time"] #[doc = " [multi thread]: fn@tokio::runtime::Builder::new_multi_thread"] pub struct TokioContext<F> { #[pin] inner: F, handle: Handle } }
+impl<F> TokioContext<F> {
+ pub fn new(future: F, handle: Handle) -> TokioContext<F> {
+ TokioContext { inner: future, handle }
+ }
+ 
+ pub fn handle(&self) -> &Handle {
+ &self.handle
+ }
+ 
+ pub fn into_inner(self) -> F {
+ self.inner
+ }
+ 
+}
+
+impl<F: Future> Future for TokioContext<F> {
+ type Output = F::Output;
+ fn poll(self, cx: &mut Context<'_>) -> Poll<Self::Output> {
+ let me = self.project();
+ let handle = me.handle;
+ let fut = me.inner;
+ let _enter = handle.enter();
+ fut.poll(cx)
+ }
+ 
+}
+
+/// Extension trait that simplifies bundling a `Handle` with a `Future`.
+pub trait RuntimeExt {
+ fn wrap<F: Future>(&self, fut: F) -> TokioContext<F>
+}
+
+impl RuntimeExt for Runtime {
+ fn wrap(&self, fut: F) -> TokioContext<F> {
+ TokioContext { inner: fut, handle: self.handle().clone() }
+ }
+ 
+}
+

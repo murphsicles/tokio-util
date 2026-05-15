@@ -1,0 +1,308 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/task/join_map.rs
+
+use hashbrown::hash_table::Entry;
+use hashbrown::{ HashMap, HashTable };
+use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
+use std::fmt;
+use std::future::Future;
+use std::hash::{ BuildHasher, Hash };
+use std::marker::PhantomData;
+use tokio::runtime::Handle;
+use tokio::task::{ AbortHandle, Id, JoinError, JoinSet, LocalSet };
+/// A collection of tasks spawned on a Tokio runtime, associated with hash map
+/// keys.
+/// 
+/// This type is very similar to the [`JoinSet`] type in `tokio::task`, with the
+/// addition of a set of keys associated with each task. These keys allow
+/// [cancelling a task][abort] or [multiple tasks][abort_matching] in the
+/// `JoinMap` based on their keys, or [test whether a task corresponding to a
+/// given key exists][contains] in the `JoinMap`.
+/// 
+/// In addition, when tasks in the `JoinMap` complete, they will return the
+/// associated key along with the value returned by the task, if any.
+/// 
+/// A `JoinMap` can be used to await the completion of some or all of the tasks
+/// in the map. The map is not ordered, and the tasks will be returned in the
+/// order they complete.
+/// 
+/// All of the tasks must have the same return type `V`.
+/// 
+/// When the `JoinMap` is dropped, all tasks in the `JoinMap` are immediately aborted.
+/// 
+/// # Examples
+/// 
+/// Spawn multiple tasks and wait for them:
+/// 
+/// ```
+/// use tokio_util::task::JoinMap;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let mut map = JoinMap::new();
+/// 
+/// for i in 0..10 {
+/// // Spawn a task on the `JoinMap` with `i` as its key.
+/// map.spawn(i, async move { /* ... */ });
+/// }
+/// 
+/// let mut seen = [false; 10];
+/// 
+/// // When a task completes, `join_next` returns the task's key along
+/// // with its output.
+/// while let Some((key, res)) = map.join_next().await {
+/// seen[key] = true;
+/// assert!(res.is_ok(), "task {} completed successfully!", key);
+/// }
+/// 
+/// for i in 0..10 {
+/// assert!(seen[i]);
+/// }
+/// # }
+/// ```
+/// 
+/// Cancel tasks based on their keys:
+/// 
+/// ```
+/// use tokio_util::task::JoinMap;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let mut map = JoinMap::new();
+/// 
+/// map.spawn("hello world", std::future::ready(1));
+/// map.spawn("goodbye world", std::future::pending());
+/// 
+/// // Look up the "goodbye world" task in the map and abort it.
+/// let aborted = map.abort("goodbye world");
+/// 
+/// // `JoinMap::abort` returns `true` if a task existed for the
+/// // provided key.
+/// assert!(aborted);
+/// 
+/// while let Some((key, res)) = map.join_next().await {
+/// if key == "goodbye world" {
+/// // The aborted task should complete with a cancelled `JoinError`.
+/// assert!(res.unwrap_err().is_cancelled());
+/// } else {
+/// // Other tasks should complete normally.
+/// assert_eq!(res.unwrap(), 1);
+/// }
+/// }
+/// # }
+/// ```
+/// 
+/// [`JoinSet`]: tokio::task::JoinSet
+/// [abort]: fn@Self::abort
+/// [abort_matching]: fn@Self::abort_matching
+/// [contains]: fn@Self::contains_key
+pub struct JoinMap<K, V, S> {
+ tasks_by_key: HashTable<(K, AbortHandle)>,
+ hashes_by_task: HashMap<Id, u64, S>,
+ tasks: JoinSet<V>,
+}
+
+impl<K, V> JoinMap<K, V> {
+ pub fn new() -> Self {
+ Self::with_hasher(RandomState::new())
+ }
+ 
+ pub fn with_capacity(capacity: usize) -> Self {
+ JoinMap::with_capacity_and_hasher(capacity, Default::default())
+ }
+ 
+}
+
+impl<K, V, S> JoinMap<K, V, S> {
+ pub fn with_hasher(hash_builder: S) -> Self {
+ Self::with_capacity_and_hasher(0, hash_builder)
+ }
+ 
+ pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
+ Self { tasks_by_key: HashTable::with_capacity(capacity), hashes_by_task: HashMap::with_capacity_and_hasher(capacity, hash_builder), tasks: JoinSet::new() }
+ }
+ 
+ pub fn len(&self) -> usize {
+ let len = self.tasks_by_key.len();
+ debug_assert_eq!(len, self.hashes_by_task.len());
+ len
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ let empty = self.tasks_by_key.is_empty();
+ debug_assert_eq!(empty, self.hashes_by_task.is_empty());
+ empty
+ }
+ 
+ pub fn capacity(&self) -> usize {
+ let capacity = self.tasks_by_key.capacity();
+ debug_assert_eq!(capacity, self.hashes_by_task.capacity());
+ capacity
+ }
+ 
+}
+
+impl<K, V, S> JoinMap<K, V, S> where K: Hash + Eq, V: static, S: BuildHasher {
+ pub fn spawn(&mut self, key: K, task: F) {
+ let task = self.tasks.spawn(task);
+ self.insert(key, task)
+ }
+ 
+ pub fn spawn_on(&mut self, key: K, task: F, handle: &Handle) {
+ let task = self.tasks.spawn_on(task, handle);
+ self.insert(key, task);
+ }
+ 
+ pub fn spawn_blocking(&mut self, key: K, f: F) {
+ let task = self.tasks.spawn_blocking(f);
+ self.insert(key, task)
+ }
+ 
+ pub fn spawn_blocking_on(&mut self, key: K, f: F, handle: &Handle) {
+ let task = self.tasks.spawn_blocking_on(f, handle);
+ self.insert(key, task);
+ }
+ 
+ pub fn spawn_local(&mut self, key: K, task: F) {
+ let task = self.tasks.spawn_local(task);
+ self.insert(key, task);
+ }
+ 
+ pub fn spawn_local_on(&mut self, key: K, task: F, local_set: &LocalSet) {
+ let task = self.tasks.spawn_local_on(task, local_set);
+ self.insert(key, task)
+ }
+ 
+ fn insert(&mut self, key: K, abort: AbortHandle) {
+ let hash_builder = self.hashes_by_task.hasher();
+ let hash = hash_builder.hash_one(&key);
+ let id = abort.id();
+ let entry = self.tasks_by_key.entry(hash, | (k, _) | *k == key, | (k, _) | hash_builder.hash_one(k));
+ match entry { Entry::Occupied(occ) => { (key, abort) = std::mem::replace(occ.into_mut(), (key, abort)); let _prev_hash = self.hashes_by_task.remove(&abort.id()); debug_assert_eq!(Some(hash), _prev_hash); let _prev = self.hashes_by_task.insert(id, hash); debug_assert!(_prev.is_none(), "no prior task should have had the same ID"); abort.abort(); drop(key); } Entry::Vacant(vac) => { vac.insert((key, abort)); let _prev = self.hashes_by_task.insert(id, hash); debug_assert!(_prev.is_none(), "no prior task should have had the same ID"); } };
+ }
+ 
+ pub fn join_next(&mut self) -> Option<(K, Result<V, JoinError>)> {
+ loop { let(res, id) = match self.tasks.join_next_with_id().await { Some(Ok((id, output))) =>(Ok(output), id), Some(Err(e)) => { let id = e.id(); (Err(e), id) } None => return None }; if let Some(key) = self.remove_by_id(id) { break Some((key, res)); } }
+ }
+ 
+ pub fn shutdown(&mut self) {
+ self.abort_all();
+ while self.join_next().await.is_some() { }
+ }
+ 
+ pub fn abort(&mut self, key: &Q) -> bool {
+ match self.get_by_key(key) { Some((_, handle)) => { handle.abort(); true } None => false }
+ }
+ 
+ pub fn abort_matching(&mut self, predicate: impl FnMut) {
+ for(key, task) in &self.tasks_by_key { if predicate(key) { task.abort(); } }
+ }
+ 
+ pub fn keys(&self) -> JoinMapKeys<'_, K, V> {
+ JoinMapKeys { iter: self.tasks_by_key.iter(), _value: PhantomData }
+ }
+ 
+ pub fn contains_key(&self, key: &Q) -> bool {
+ self.get_by_key(key).is_some()
+ }
+ 
+ pub fn contains_task(&self, task: &Id) -> bool {
+ self.hashes_by_task.contains_key(task)
+ }
+ 
+ pub fn reserve(&mut self, additional: usize) {
+ self.tasks_by_key.reserve(additional, | (k, _) | { self.hashes_by_task.hasher().hash_one(k) });
+ self.hashes_by_task.reserve(additional);
+ }
+ 
+ pub fn shrink_to_fit(&mut self) {
+ self.hashes_by_task.shrink_to_fit();
+ self.tasks_by_key.shrink_to_fit(| (k, _) | self.hashes_by_task.hasher().hash_one(k));
+ }
+ 
+ pub fn shrink_to(&mut self, min_capacity: usize) {
+ self.hashes_by_task.shrink_to(min_capacity);
+ self.tasks_by_key.shrink_to(min_capacity, | (k, _) | { self.hashes_by_task.hasher().hash_one(k) })
+ }
+ 
+ fn get_by_key(&self, key: &Q) -> Option<&(K, AbortHandle)> {
+ let hash = self.hashes_by_task.hasher().hash_one(key);
+ self.tasks_by_key.find(hash, | (k, _) | k.borrow() == key)
+ }
+ 
+ fn remove_by_id(&mut self, id: Id) -> Option<K> {
+ let hash = self.hashes_by_task.remove(&id) ?;
+ let entry = self.tasks_by_key.find_entry(hash, | (_, abort) | abort.id() == id);
+ let _ = match entry { Ok(entry) => entry.remove().0, _ => return None };
+ Some(key)
+ }
+ 
+}
+
+impl<K, V, S> JoinMap<K, V, S> where V: static {
+ pub fn abort_all(&mut self) {
+ self.tasks.abort_all()
+ }
+ 
+ pub fn detach_all(&mut self) {
+ self.tasks.detach_all();
+ self.tasks_by_key.clear();
+ self.hashes_by_task.clear();
+ }
+ 
+}
+
+impl<K: fmt::Debug, V, S> fmt::Debug for JoinMap<K, V, S> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ struct KeySet<a, K: fmt::Debug> {
+ (&HashTable<(K, AbortHandle)>),
+ }
+ 
+ impl<K: fmt::Debug> fmt::Debug for KeySet<'_, K> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_map().entries(self.0.iter().map(| (key, abort) | (key, abort.id()))).finish()
+ }
+ 
+ }
+ 
+ f.debug_struct("JoinMap").field("tasks", &KeySet(&self.tasks_by_key)).finish()
+ }
+ 
+}
+
+impl<K, V> Default for JoinMap<K, V> {
+ fn default() -> Self {
+ Self::new()
+ }
+ 
+}
+
+/// An iterator over the keys of a [`JoinMap`].
+#[derive(Debug, Clone)]
+pub struct JoinMapKeys<a, K, V> {
+ iter: hashbrown::hash_table::Iter<'a, (K, AbortHandle)>,
+ _value: PhantomData<&V>,
+}
+
+impl<a, K, V> Iterator for JoinMapKeys<'a, K, V> {
+ type Item = &K;
+ fn next(&mut self) -> Option<&K> {
+ self.iter.next().map(| (key, _) | key)
+ }
+ 
+ fn size_hint(&self) ->(usize, Option<usize>) {
+ self.iter.size_hint()
+ }
+ 
+}
+
+impl<a, K, V> ExactSizeIterator for JoinMapKeys<'a, K, V> {
+ fn len(&self) -> usize {
+ self.iter.len()
+ }
+ 
+}
+
+impl<a, K, V> std::iter::FusedIterator for JoinMapKeys<'a, K, V> {
+}
+

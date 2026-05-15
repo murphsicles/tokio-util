@@ -1,0 +1,41 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/codec/decoder.rs
+
+use crate::codec::Framed;
+use tokio::io::{ AsyncRead, AsyncWrite };
+use bytes::BytesMut;
+use std::io;
+/// Decoding of frames via buffers.
+/// 
+/// This trait is used when constructing an instance of [`Framed`] or
+/// [`FramedRead`]. An implementation of `Decoder` takes a byte stream that has
+/// already been buffered in `src` and decodes the data into a stream of
+/// `Self::Item` frames.
+/// 
+/// Implementations are able to track state on `self`, which enables
+/// implementing stateful streaming parsers. In many cases, though, this type
+/// will simply be a unit struct(e.g. `struct HttpDecoder`).
+/// 
+/// For some underlying data-sources, namely files and FIFOs,
+/// it's possible to temporarily read 0 bytes by reaching EOF.
+/// 
+/// In these cases `decode_eof` will be called until it signals
+/// fulfillment of all closing frames by returning `Ok(None)`.
+/// After that, repeated attempts to read from the [`Framed`] or [`FramedRead`]
+/// will not invoke `decode` or `decode_eof` again, until data can be read
+/// during a retry.
+/// 
+/// It is up to the Decoder to keep track of a restart after an EOF,
+/// and to decide how to handle such an event by, for example,
+/// allowing frames to cross EOF boundaries, re-emitting opening frames, or
+/// resetting the entire internal state.
+/// 
+/// [`Framed`]: crate::codec::Framed
+/// [`FramedRead`]: crate::codec::FramedRead
+pub trait Decoder {
+ type Item;
+ type Error;
+ fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>;
+ fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>;
+ fn framed<T: AsyncRead + AsyncWrite + Sized>(self, io: T) -> Framed<T, Self> where Self: Sized
+}
+

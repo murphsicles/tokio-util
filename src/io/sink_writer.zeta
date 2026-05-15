@@ -1,0 +1,61 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/io/sink_writer.rs
+
+use futures_sink::Sink;
+use futures_core::stream::Stream;
+use pin_project_lite::pin_project;
+use std::io;
+use std::pin::Pin;
+use std::task::{ ready, Context, Poll };
+use tokio::io::{ AsyncRead, AsyncWrite };
+pin_project ! { #[doc = " Convert a [`Sink`] of byte chunks into an [`AsyncWrite`]."] #[doc = ""] #[doc = " Whenever you write to this [`SinkWriter`], the supplied bytes are"] #[doc = " forwarded to the inner [`Sink`]. When `shutdown` is called on this"] #[doc = " [`SinkWriter`], the inner sink is closed."] #[doc = ""] #[doc = " This adapter takes a `Sink<&[u8]>` and provides an [`AsyncWrite`] impl"] #[doc = " for it. Because of the lifetime, this trait is relatively rarely"] #[doc = " implemented. The main ways to get a `Sink<&[u8]>` that you can use with"] #[doc = " this type are:"] #[doc = ""] #[doc = " *With the codec module by implementing the [`Encoder`]`<&[u8]>` trait."] #[doc = " *By wrapping a `Sink<Bytes>` in a [`CopyToBytes`]."] #[doc = " *Manually implementing `Sink<&[u8]>` directly."] #[doc = ""] #[doc = " The opposite conversion of implementing `Sink<_>` for an [`AsyncWrite`]"] #[doc = " is done using the [`codec`] module."] #[doc = ""] #[doc = " # Example"] #[doc = ""] #[doc = " ```"] #[doc = " use bytes::Bytes;"] #[doc = " use futures_util::SinkExt;"] #[doc = " use std::io::{Error, ErrorKind};"] #[doc = " use tokio::io::AsyncWriteExt;"] #[doc = " use tokio_util::io::{SinkWriter, CopyToBytes};"] #[doc = " use tokio_util::sync::PollSender;"] #[doc = ""] #[doc = " # #[tokio::main(flavor = \"current_thread\")]"] #[doc = " # async fn main() -> Result<(), Error> {"] #[doc = " // We use an mpsc channel as an example of a `Sink<Bytes>`."] #[doc = " let(tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(1);"] #[doc = " let sink = PollSender::new(tx).sink_map_err(|_| Error::from(ErrorKind::BrokenPipe));"] #[doc = ""] #[doc = " // Wrap it in `CopyToBytes` to get a `Sink<&[u8]>`."] #[doc = " let mut writer = SinkWriter::new(CopyToBytes::new(sink));"] #[doc = ""] #[doc = " // Write data to our interface..."] #[doc = " let data: [u8; 4] = [1, 2, 3, 4];"] #[doc = " let _ = writer.write(&data).await?;"] #[doc = ""] #[doc = " // ... and receive it."] #[doc = " assert_eq!(data.as_slice(), &*rx.recv().await.unwrap());"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`AsyncWrite`]: tokio::io::AsyncWrite"] #[doc = " [`CopyToBytes`]: crate::io::CopyToBytes"] #[doc = " [`Encoder`]: crate::codec::Encoder"] #[doc = " [`Sink`]: futures_sink::Sink"] #[doc = " [`codec`]: crate::codec"] #[derive(Debug)] pub struct SinkWriter<S> { #[pin] inner: S } }
+impl<S> SinkWriter<S> {
+ pub fn new(sink: S) -> Self {
+ Self { inner: sink }
+ }
+ 
+ pub fn get_ref(&self) -> &S {
+ &self.inner
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut S {
+ &mut self.inner
+ }
+ 
+ pub fn into_inner(self) -> S {
+ self.inner
+ }
+ 
+}
+
+impl<S, E> AsyncWrite for SinkWriter<S> where S: Sink<&[u8], _>, E: Into<io::Error> {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, io::Error>> {
+ let mut this = self.project();
+ ready!(this.inner.as_mut().poll_ready(cx).map_err(Into::into)) ?;
+ match this.inner.as_mut().start_send(buf) { Ok(()) => Poll::Ready(Ok(buf.len())), Err(e) => Poll::Ready(Err(e.into())) }
+ }
+ 
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+ self.project().inner.poll_flush(cx).map_err(Into::into)
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+ self.project().inner.poll_close(cx).map_err(Into::into)
+ }
+ 
+}
+
+impl<S: Stream> Stream for SinkWriter<S> {
+ type Item = S::Item;
+ fn poll_next(self, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+ self.project().inner.poll_next(cx)
+ }
+ 
+}
+
+impl<S: AsyncRead> AsyncRead for SinkWriter<S> {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<io::Result<()>> {
+ self.project().inner.poll_read(cx, buf)
+ }
+ 
+}
+

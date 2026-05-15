@@ -1,0 +1,147 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/codec/framed.rs
+
+use crate::codec::decoder::Decoder;
+use crate::codec::encoder::Encoder;
+use crate::codec::framed_impl::{ FramedImpl, RWFrames, ReadFrame, WriteFrame };
+use futures_core::Stream;
+use tokio::io::{ AsyncRead, AsyncWrite };
+use bytes::BytesMut;
+use futures_sink::Sink;
+use pin_project_lite::pin_project;
+use std::fmt;
+use std::io;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+pin_project ! { #[doc = " A unified [`Stream`] and [`Sink`] interface to an underlying I/O object, using"] #[doc = " the `Encoder` and `Decoder` traits to encode and decode frames."] #[doc = ""] #[doc = " You can create a `Framed` instance by using the [`Decoder::framed`] adapter, or"] #[doc = " by using the `new` function seen below."] #[doc = ""] #[doc = " # Cancellation safety"] #[doc = ""] #[doc = " * [`futures_util::sink::SinkExt::send`]: if send is used as the event in a"] #[doc = " `tokio::select!` statement and some other branch completes first, then it is"] #[doc = " guaranteed that the message was not sent, but the message itself is lost."] #[doc = " * [`tokio_stream::StreamExt::next`]: This method is cancel safe. The returned"] #[doc = " future only holds onto a reference to the underlying stream, so dropping it will"] #[doc = " never lose a value."] #[doc = ""] #[doc = " [`Stream`]: futures_core::Stream"] #[doc = " [`Sink`]: futures_sink::Sink"] #[doc = " [`AsyncRead`]: tokio::io::AsyncRead"] #[doc = " [`Decoder::framed`]: crate::codec::Decoder::framed()"] #[doc = " [`futures_util::sink::SinkExt::send`]: futures_util::sink::SinkExt::send"] #[doc = " [`tokio_stream::StreamExt::next`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.next"] pub struct Framed<T, U> { #[pin] inner : FramedImpl<T, U, RWFrames> } }
+impl<T, U> Framed<T, U> {
+ pub fn new(inner: T, codec: U) -> Framed<T, U> {
+ Framed { inner: FramedImpl { inner, codec, state: Default::default() } }
+ }
+ 
+ pub fn with_capacity(inner: T, codec: U, capacity: usize) -> Framed<T, U> {
+ Framed { inner: FramedImpl { inner, codec, state: RWFrames { read: ReadFrame { eof: false, is_readable: false, buffer: BytesMut::with_capacity(capacity), has_errored: false }, write: WriteFrame { buffer: BytesMut::with_capacity(capacity), backpressure_boundary: capacity } } } }
+ }
+ 
+ pub fn from_parts(parts: FramedParts<T, U>) -> Framed<T, U> {
+ Framed { inner: FramedImpl { inner: parts.io, codec: parts.codec, state: RWFrames { read: parts.read_buf.into(), write: parts.write_buf.into() } } }
+ }
+ 
+ pub fn get_ref(&self) -> &T {
+ &self.inner.inner
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut T {
+ &mut self.inner.inner
+ }
+ 
+ pub fn get_pin_mut(self) -> Pin<&mut T> {
+ self.project().inner.project().inner
+ }
+ 
+ pub fn codec(&self) -> &U {
+ &self.inner.codec
+ }
+ 
+ pub fn codec_mut(&mut self) -> &mut U {
+ &mut self.inner.codec
+ }
+ 
+ pub fn map_codec(self, map: F) -> Framed<T, C> {
+ let parts = self.into_parts();
+ Framed::from_parts(FramedParts { io: parts.io, codec: map(parts.codec), read_buf: parts.read_buf, write_buf: parts.write_buf, _priv: () })
+ }
+ 
+ pub fn codec_pin_mut(self) -> &mut U {
+ self.project().inner.project().codec
+ }
+ 
+ pub fn read_buffer(&self) -> &BytesMut {
+ &self.inner.state.read.buffer
+ }
+ 
+ pub fn read_buffer_mut(&mut self) -> &mut BytesMut {
+ &mut self.inner.state.read.buffer
+ }
+ 
+ pub fn write_buffer(&self) -> &BytesMut {
+ &self.inner.state.write.buffer
+ }
+ 
+ pub fn write_buffer_mut(&mut self) -> &mut BytesMut {
+ &mut self.inner.state.write.buffer
+ }
+ 
+ pub fn backpressure_boundary(&self) -> usize {
+ self.inner.state.write.backpressure_boundary
+ }
+ 
+ pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+ self.inner.state.write.backpressure_boundary = boundary;
+ }
+ 
+ pub fn into_inner(self) -> T {
+ self.inner.inner
+ }
+ 
+ pub fn into_parts(self) -> FramedParts<T, U> {
+ FramedParts { io: self.inner.inner, codec: self.inner.codec, read_buf: self.inner.state.read.buffer, write_buf: self.inner.state.write.buffer, _priv: () }
+ }
+ 
+}
+
+impl<T, U> Stream for Framed<T, U> where T: AsyncRead, U: Decoder {
+ type Item = Result<U::Item, U::Error>;
+ fn poll_next(self, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+ self.project().inner.poll_next(cx)
+ }
+ 
+}
+
+impl<T, I, U> Sink<I> for Framed<T, U> where T: AsyncWrite, U: Encoder<I>, U::Error: From<io::Error> {
+ type Error = U::Error;
+ fn poll_ready(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_ready(cx)
+ }
+ 
+ fn start_send(self, item: I) -> Result<(), Self::Error> {
+ self.project().inner.start_send(item)
+ }
+ 
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_flush(cx)
+ }
+ 
+ fn poll_close(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_close(cx)
+ }
+ 
+}
+
+impl<T, U> fmt::Debug for Framed<T, U> where T: fmt::Debug, U: fmt::Debug {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("Framed").field("io", self.get_ref()).field("codec", self.codec()).finish()
+ }
+ 
+}
+
+/// `FramedParts` contains an export of the data of a Framed transport.
+/// It can be used to construct a new [`Framed`] with a different codec.
+/// It contains all current buffers and the inner transport.
+/// 
+/// [`Framed`]: crate::codec::Framed
+#[derive(Debug)]
+pub struct FramedParts<T, U> {
+ pub io: T,
+ pub codec: U,
+ pub read_buf: BytesMut,
+ pub write_buf: BytesMut,
+ _priv: (),
+}
+
+impl<T, U> FramedParts<T, U> {
+ pub fn new(io: T, codec: U) -> FramedParts<T, U> {
+ FramedParts { io, codec, read_buf: BytesMut::new(), write_buf: BytesMut::new(), _priv: () }
+ }
+ 
+}
+

@@ -1,0 +1,114 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/codec/framed_write.rs
+
+use crate::codec::encoder::Encoder;
+use crate::codec::framed_impl::{ FramedImpl, WriteFrame };
+use futures_core::Stream;
+use tokio::io::AsyncWrite;
+use bytes::BytesMut;
+use futures_sink::Sink;
+use pin_project_lite::pin_project;
+use std::fmt;
+use std::io;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+use super::FramedParts;
+pin_project ! { #[doc = " A [`Sink`] of frames encoded to an `AsyncWrite`."] #[doc = ""] #[doc = " For examples of how to use `FramedWrite` with a codec, see the"] #[doc = " examples on the [`codec`] module."] #[doc = ""] #[doc = " # Cancellation safety"] #[doc = ""] #[doc = " * [`futures_util::sink::SinkExt::send`]: if send is used as the event in a"] #[doc = " `tokio::select!` statement and some other branch completes first, then it is"] #[doc = " guaranteed that the message was not sent, but the message itself is lost."] #[doc = ""] #[doc = " [`Sink`]: futures_sink::Sink"] #[doc = " [`codec`]: crate::codec"] #[doc = " [`futures_util::sink::SinkExt::send`]: futures_util::sink::SinkExt::send"] pub struct FramedWrite<T, E> { #[pin] inner: FramedImpl<T, E, WriteFrame> } }
+impl<T, E> FramedWrite<T, E> {
+ pub fn new(inner: T, encoder: E) -> FramedWrite<T, E> {
+ FramedWrite { inner: FramedImpl { inner, codec: encoder, state: WriteFrame::default() } }
+ }
+ 
+ pub fn with_capacity(inner: T, encoder: E, capacity: usize) -> FramedWrite<T, E> {
+ FramedWrite { inner: FramedImpl { inner, codec: encoder, state: WriteFrame { buffer: BytesMut::with_capacity(capacity), backpressure_boundary: capacity } } }
+ }
+ 
+ pub fn get_ref(&self) -> &T {
+ &self.inner.inner
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut T {
+ &mut self.inner.inner
+ }
+ 
+ pub fn get_pin_mut(self) -> Pin<&mut T> {
+ self.project().inner.project().inner
+ }
+ 
+ pub fn into_inner(self) -> T {
+ self.inner.inner
+ }
+ 
+ pub fn encoder(&self) -> &E {
+ &self.inner.codec
+ }
+ 
+ pub fn encoder_mut(&mut self) -> &mut E {
+ &mut self.inner.codec
+ }
+ 
+ pub fn map_encoder(self, map: F) -> FramedWrite<T, C> {
+ let _ = self.inner;
+ FramedWrite { inner: FramedImpl { inner, state, codec: map(codec) } }
+ }
+ 
+ pub fn encoder_pin_mut(self) -> &mut E {
+ self.project().inner.project().codec
+ }
+ 
+ pub fn write_buffer(&self) -> &BytesMut {
+ &self.inner.state.buffer
+ }
+ 
+ pub fn write_buffer_mut(&mut self) -> &mut BytesMut {
+ &mut self.inner.state.buffer
+ }
+ 
+ pub fn backpressure_boundary(&self) -> usize {
+ self.inner.state.backpressure_boundary
+ }
+ 
+ pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+ self.inner.state.backpressure_boundary = boundary;
+ }
+ 
+ pub fn into_parts(self) -> FramedParts<T, E> {
+ FramedParts { io: self.inner.inner, codec: self.inner.codec, read_buf: BytesMut::new(), write_buf: self.inner.state.buffer, _priv: () }
+ }
+ 
+}
+
+impl<T, I, E> Sink<I> for FramedWrite<T, E> where T: AsyncWrite, E: Encoder<I>, E::Error: From<io::Error> {
+ type Error = E::Error;
+ fn poll_ready(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_ready(cx)
+ }
+ 
+ fn start_send(self, item: I) -> Result<(), Self::Error> {
+ self.project().inner.start_send(item)
+ }
+ 
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_flush(cx)
+ }
+ 
+ fn poll_close(self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+ self.project().inner.poll_close(cx)
+ }
+ 
+}
+
+impl<T, D> Stream for FramedWrite<T, D> where T: Stream {
+ type Item = T::Item;
+ fn poll_next(self, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+ self.project().inner.project().inner.poll_next(cx)
+ }
+ 
+}
+
+impl<T, U> fmt::Debug for FramedWrite<T, U> where T: fmt::Debug, U: fmt::Debug {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("FramedWrite").field("inner", &self.get_ref()).field("encoder", &self.encoder()).field("buffer", &self.inner.state.buffer).finish()
+ }
+ 
+}
+

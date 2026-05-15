@@ -1,0 +1,4 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/sync/tests/mod.rs
+
+#[cfg(loom)]
+mod loom_cancellation_token;

@@ -1,0 +1,13 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/sync/mod.rs
+
+mod cancellation_token;
+pub use cancellation_token::{ guard::DropGuard, guard_ref::DropGuardRef, CancellationToken, WaitForCancellationFuture, WaitForCancellationFutureOwned };
+pub(crate) use cancellation_token::{ RunUntilCancelledFuture, RunUntilCancelledFutureOwned };
+mod mpsc;
+pub use mpsc::{ PollSendError, PollSender };
+mod poll_semaphore;
+pub use poll_semaphore::PollSemaphore;
+mod reusable_box;
+pub use reusable_box::ReusableBoxFuture;
+#[cfg(test)]
+mod tests;

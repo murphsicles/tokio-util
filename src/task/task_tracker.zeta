@@ -1,0 +1,366 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/task/task_tracker.rs
+
+use pin_project_lite::pin_project;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{ AtomicUsize, Ordering };
+use std::sync::Arc;
+use std::task::{ Context, Poll };
+use tokio::sync::{ futures::Notified, Notify };
+#[cfg(feature = "rt")] use tokio::{ runtime::Handle, task::{ JoinHandle, LocalSet } };
+/// A task tracker used for waiting until tasks exit.
+/// 
+/// This is usually used together with [`CancellationToken`] to implement [graceful shutdown]. The
+/// `CancellationToken` is used to signal to tasks that they should shut down, and the
+/// `TaskTracker` is used to wait for them to finish shutting down.
+/// 
+/// The `TaskTracker` will also keep track of a `closed` boolean. This is used to handle the case
+/// where the `TaskTracker` is empty, but we don't want to shut down yet. This means that the
+/// [`wait`] method will wait until *both* of the following happen at the same time:
+/// 
+/// *The `TaskTracker` must be closed using the [`close`] method.
+/// *The `TaskTracker` must be empty, that is, all tasks that it is tracking must have exited.
+/// 
+/// When a call to [`wait`] returns, it is guaranteed that all tracked tasks have exited and that
+/// the destructor of the future has finished running. However, there might be a short amount of
+/// time where [`JoinHandle::is_finished`] returns false.
+/// 
+/// # Comparison to `JoinSet`
+/// 
+/// The main Tokio crate has a similar collection known as [`JoinSet`]. The `JoinSet` type has a
+/// lot more features than `TaskTracker`, so `TaskTracker` should only be used when one of its
+/// unique features is required:
+/// 
+/// 1. When tasks exit, a `TaskTracker` will allow the task to immediately free its memory.
+/// 2. By not closing the `TaskTracker`, [`wait`] will be prevented from returning even if
+/// the `TaskTracker` is empty.
+/// 3. A `TaskTracker` does not require mutable access to insert tasks.
+/// 4. A `TaskTracker` can be cloned to share it with many tasks.
+/// 
+/// The first point is the most important one. A [`JoinSet`] keeps track of the return value of
+/// every inserted task. This means that if the caller keeps inserting tasks and never calls
+/// [`join_next`], then their return values will keep building up and consuming memory, _even if_
+/// most of the tasks have already exited. This can cause the process to run out of memory. With a
+/// `TaskTracker`, this does not happen. Once tasks exit, they are immediately removed from the
+/// `TaskTracker`.
+/// 
+/// Note that unlike [`JoinSet`], dropping a `TaskTracker` does not abort the tasks.
+/// 
+/// # Examples
+/// 
+/// For more examples, please see the topic page on [graceful shutdown].
+/// 
+/// ## Spawn tasks and wait for them to exit
+/// 
+/// This is a simple example. For this case, [`JoinSet`] should probably be used instead.
+/// 
+/// ```
+/// use tokio_util::task::TaskTracker;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let tracker = TaskTracker::new();
+/// 
+/// for i in 0..10 {
+/// tracker.spawn(async move {
+/// println!("Task {} is running!", i);
+/// });
+/// }
+/// // Once we spawned everything, we close the tracker.
+/// tracker.close();
+/// 
+/// // Wait for everything to finish.
+/// tracker.wait().await;
+/// 
+/// println!("This is printed after all of the tasks.");
+/// # }
+/// ```
+/// 
+/// ## Wait for tasks to exit
+/// 
+/// This example shows the intended use-case of `TaskTracker`. It is used together with
+/// [`CancellationToken`] to implement graceful shutdown.
+/// ```
+/// use tokio_util::sync::CancellationToken;
+/// use tokio_util::task::TaskTracker;
+/// use tokio_util::time::FutureExt;
+/// 
+/// use tokio::time::{self, Duration};
+/// 
+/// async fn background_task(num: u64) {
+/// for i in 0..10 {
+/// time::sleep(Duration::from_millis(100*num)).await;
+/// println!("Background task {} in iteration {}.", num, i);
+/// }
+/// }
+/// 
+/// #[tokio::main]
+/// # async fn _hidden() {}
+/// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+/// async fn main() {
+/// let tracker = TaskTracker::new();
+/// let token = CancellationToken::new();
+/// 
+/// for i in 0..10 {
+/// let token = token.clone();
+/// tracker.spawn(async move {
+/// // Use a `with_cancellation_token_owned` to kill the background task
+/// // if the token is cancelled.
+/// match background_task(i)
+/// .with_cancellation_token_owned(token)
+/// .await
+/// {
+/// Some(()) => println!("Task {} exiting normally.", i),
+/// None => {
+/// // Do some cleanup before we really exit.
+/// time::sleep(Duration::from_millis(50)).await;
+/// println!("Task {} finished cleanup.", i);
+/// }
+/// }
+/// });
+/// }
+/// 
+/// // Spawn a background task that will send the shutdown signal.
+/// {
+/// let tracker = tracker.clone();
+/// tokio::spawn(async move {
+/// // Normally you would use something like ctrl-c instead of
+/// // sleeping.
+/// time::sleep(Duration::from_secs(2)).await;
+/// tracker.close();
+/// token.cancel();
+/// });
+/// }
+/// 
+/// // Wait for all tasks to exit.
+/// tracker.wait().await;
+/// 
+/// println!("All tasks have exited now.");
+/// }
+/// ```
+/// 
+/// [`CancellationToken`]: crate::sync::CancellationToken
+/// [`JoinHandle::is_finished`]: tokio::task::JoinHandle::is_finished
+/// [`JoinSet`]: tokio::task::JoinSet
+/// [`close`]: Self::close
+/// [`join_next`]: tokio::task::JoinSet::join_next
+/// [`wait`]: Self::wait
+/// [graceful shutdown]: https://tokio.rs/tokio/topics/shutdown
+pub struct TaskTracker {
+ inner: Arc<TaskTrackerInner>,
+}
+
+/// Represents a task tracked by a [`TaskTracker`].
+#[must_use]
+#[derive(Debug)]
+pub struct TaskTrackerToken {
+ task_tracker: TaskTracker,
+}
+
+struct TaskTrackerInner {
+ state: AtomicUsize,
+ on_last_exit: Notify,
+}
+
+pin_project ! { #[doc = " A future that is tracked as a task by a [`TaskTracker`]."] #[doc = ""] #[doc = " The associated [`TaskTracker`] cannot complete until this future is dropped."] #[doc = ""] #[doc = " This future is returned by [`TaskTracker::track_future`]."] #[must_use = "futures do nothing unless polled"] pub struct TrackedFuture<F> { #[pin] future: F, token: TaskTrackerToken } }
+pin_project ! { #[doc = " A future that completes when the [`TaskTracker`] is empty and closed."] #[doc = ""] #[doc = " This future is returned by [`TaskTracker::wait`]."] #[must_use = "futures do nothing unless polled"] pub struct TaskTrackerWaitFuture <'a > { #[pin] future: Notified <'a>, inner: Option <&'a TaskTrackerInner > } }
+impl TaskTrackerInner {
+ fn new() -> Self {
+ Self { state: AtomicUsize::new(0), on_last_exit: Notify::new() }
+ }
+ 
+ fn is_closed_and_empty(&self) -> bool {
+ self.state.load(Ordering::Acquire) == 1
+ }
+ 
+ fn set_closed(&self) -> bool {
+ let state = self.state.fetch_or(1, Ordering::AcqRel);
+ if state == 0 { self.notify_now(); }
+ (state &1) == 0
+ }
+ 
+ fn set_open(&self) -> bool {
+ let state = self.state.fetch_and(! 1, Ordering::AcqRel);
+ (state &1) == 1
+ }
+ 
+ fn add_task(&self) {
+ self.state.fetch_add(2, Ordering::Relaxed);
+ }
+ 
+ fn drop_task(&self) {
+ let state = self.state.fetch_sub(2, Ordering::Release);
+ if state == 3 { self.notify_now(); }
+ }
+ 
+ fn notify_now(&self) {
+ self.state.load(Ordering::Acquire);
+ self.on_last_exit.notify_waiters();
+ }
+ 
+}
+
+impl TaskTracker {
+ pub fn new() -> Self {
+ Self { inner: Arc::new(TaskTrackerInner::new()) }
+ }
+ 
+ pub fn wait(&self) -> TaskTrackerWaitFuture<'_> {
+ TaskTrackerWaitFuture { future: self.inner.on_last_exit.notified(), inner: if self.inner.is_closed_and_empty() { None } else { Some(&self.inner) } }
+ }
+ 
+ pub fn close(&self) -> bool {
+ self.inner.set_closed()
+ }
+ 
+ pub fn reopen(&self) -> bool {
+ self.inner.set_open()
+ }
+ 
+ pub fn is_closed(&self) -> bool {
+ (self.inner.state.load(Ordering::Acquire) &1) != 0
+ }
+ 
+ pub fn len(&self) -> usize {
+ self.inner.state.load(Ordering::Acquire)>> 1
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ self.inner.state.load(Ordering::Acquire) <= 1
+ }
+ 
+ pub fn spawn(&self, task: F) -> JoinHandle<F::Output> {
+ tokio::task::spawn(self.track_future(task))
+ }
+ 
+ pub fn spawn_on(&self, task: F, handle: &Handle) -> JoinHandle<F::Output> {
+ handle.spawn(self.track_future(task))
+ }
+ 
+ pub fn spawn_local(&self, task: F) -> JoinHandle<F::Output> {
+ tokio::task::spawn_local(self.track_future(task))
+ }
+ 
+ pub fn spawn_local_on(&self, task: F, local_set: &LocalSet) -> JoinHandle<F::Output> {
+ local_set.spawn_local(self.track_future(task))
+ }
+ 
+ pub fn spawn_blocking(&self, task: F) -> JoinHandle<T> {
+ let token = self.token();
+ tokio::task::spawn_blocking(move | | { let res = task(); drop(token); res })
+ }
+ 
+ pub fn spawn_blocking_on(&self, task: F, handle: &Handle) -> JoinHandle<T> {
+ let token = self.token();
+ handle.spawn_blocking(move | | { let res = task(); drop(token); res })
+ }
+ 
+ pub fn track_future(&self, future: F) -> TrackedFuture<F> {
+ TrackedFuture { future, token: self.token() }
+ }
+ 
+ pub fn token(&self) -> TaskTrackerToken {
+ self.inner.add_task();
+ TaskTrackerToken { task_tracker: self.clone() }
+ }
+ 
+ pub fn ptr_eq(left: &TaskTracker, right: &TaskTracker) -> bool {
+ Arc::ptr_eq(&left.inner, &right.inner)
+ }
+ 
+}
+
+impl Default for TaskTracker {
+ fn default() -> TaskTracker {
+ TaskTracker::new()
+ }
+ 
+}
+
+impl Clone for TaskTracker {
+ fn clone(&self) -> TaskTracker {
+ Self { inner: self.inner.clone() }
+ }
+ 
+}
+
+fn debug_inner(inner: &TaskTrackerInner, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ let state = inner.state.load(Ordering::Acquire);
+ let is_closed = (state &1) != 0;
+ let len = state>> 1;
+ f.debug_struct("TaskTracker").field("len", &len).field("is_closed", &is_closed).field("inner", & (inner as * const TaskTrackerInner)).finish()
+}
+
+impl fmt::Debug for TaskTracker {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ debug_inner(&self.inner, f)
+ }
+ 
+}
+
+impl TaskTrackerToken {
+ pub fn task_tracker(&self) -> &TaskTracker {
+ &self.task_tracker
+ }
+ 
+}
+
+impl Clone for TaskTrackerToken {
+ fn clone(&self) -> TaskTrackerToken {
+ self.task_tracker.token()
+ }
+ 
+}
+
+impl Drop for TaskTrackerToken {
+ fn drop(&mut self) {
+ self.task_tracker.inner.drop_task();
+ }
+ 
+}
+
+impl<F: Future> Future for TrackedFuture<F> {
+ type Output = F::Output;
+ fn poll(self, cx: &mut Context<'_>) -> Poll<F::Output> {
+ self.project().future.poll(cx)
+ }
+ 
+}
+
+impl<F: fmt::Debug> fmt::Debug for TrackedFuture<F> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("TrackedFuture").field("future", &self.future).field("task_tracker", self.token.task_tracker()).finish()
+ }
+ 
+}
+
+impl<a> Future for TaskTrackerWaitFuture<'a> {
+ type Output = ();
+ fn poll(self, cx: &mut Context<'_>) -> Poll<()> {
+ let me = self.project();
+ let inner = match me.inner.as_ref() { None => return Poll::Ready(()), Some(inner) => inner };
+ let ready = inner.is_closed_and_empty() || me.future.poll(cx).is_ready();
+ if ready { *me.inner = None; Poll::Ready(()) } else { Poll::Pending }
+ }
+ 
+}
+
+impl<a> fmt::Debug for TaskTrackerWaitFuture<'a> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ struct Helper<a> {
+ (&TaskTrackerInner),
+ }
+ 
+ impl fmt::Debug for Helper<'_> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ debug_inner(self.0, f)
+ }
+ 
+ }
+ 
+ f.debug_struct("TaskTrackerWaitFuture").field("future", &self.future).field("task_tracker", &self.inner.map(Helper)).finish()
+ }
+ 
+}
+

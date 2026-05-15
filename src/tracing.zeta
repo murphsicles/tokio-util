@@ -1,0 +1,3 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/tracing.rs
+
+macro_rules ! trace { ($ ($ arg: tt) *) => { #[cfg(feature = "tracing")] tracing::trace!($ ($ arg) *); }; }

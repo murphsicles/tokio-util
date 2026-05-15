@@ -1,0 +1,18 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/lib.rs
+
+#[macro_use]
+mod cfg;
+mod loom;
+cfg_codec ! { #[macro_use] mod tracing; pub mod codec; }
+cfg_net ! { #[cfg(not(target_arch = "wasm32"))] pub mod udp; pub mod net; }
+cfg_compat ! { pub mod compat; }
+cfg_io ! { pub mod io; }
+cfg_rt ! { pub mod context; }
+#[cfg(feature = "rt")]
+pub mod task;
+cfg_time ! { pub mod time; }
+pub mod sync;
+pub mod either;
+pub use bytes;
+mod util;
+pub mod future;

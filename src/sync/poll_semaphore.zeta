@@ -1,0 +1,85 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/sync/poll_semaphore.rs
+
+use futures_core::Stream;
+use std::fmt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ ready, Context, Poll };
+use tokio::sync::{ AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError };
+use super::ReusableBoxFuture;
+/// A wrapper around [`Semaphore`] that provides a `poll_acquire` method.
+/// 
+/// [`Semaphore`]: tokio::sync::Semaphore
+pub struct PollSemaphore {
+ semaphore: Arc<Semaphore>,
+ permit_fut: Option<(u32, ReusableBoxFuture<'static, Result<OwnedSemaphorePermit, AcquireError>>)>,
+}
+
+impl PollSemaphore {
+ pub fn new(semaphore: Arc<Semaphore>) -> Self {
+ Self { semaphore, permit_fut: None }
+ }
+ 
+ pub fn close(&self) {
+ self.semaphore.close();
+ }
+ 
+ pub fn clone_inner(&self) -> Arc<Semaphore> {
+ self.semaphore.clone()
+ }
+ 
+ pub fn into_inner(self) -> Arc<Semaphore> {
+ self.semaphore
+ }
+ 
+ pub fn poll_acquire(&mut self, cx: &mut Context<'_>) -> Poll<Option<OwnedSemaphorePermit>> {
+ self.poll_acquire_many(cx, 1)
+ }
+ 
+ pub fn poll_acquire_many(&mut self, cx: &mut Context<'_>, permits: u32) -> Poll<Option<OwnedSemaphorePermit>> {
+ let permit_future = match self.permit_fut.as_mut() { Some((prev_permits, fut)) if * prev_permits == permits => fut, Some((old_permits, fut_box)) => { let fut = Arc::clone(&self.semaphore).acquire_many_owned(permits); fut_box.set(fut); *old_permits = permits; fut_box } None => { match Arc::clone(&self.semaphore).try_acquire_many_owned(permits) { Ok(permit) => return Poll::Ready(Some(permit)), Err(TryAcquireError::Closed) => return Poll::Ready(None), Err(TryAcquireError::NoPermits) => { } } let next_fut = Arc::clone(&self.semaphore).acquire_many_owned(permits); &mut self.permit_fut.get_or_insert((permits, ReusableBoxFuture::new(next_fut))).1 } };
+ let result = ready!(permit_future.poll(cx));
+ let next_fut = Arc::clone(&self.semaphore).acquire_many_owned(permits);
+ permit_future.set(next_fut);
+ match result { Ok(permit) => Poll::Ready(Some(permit)), Err(_closed) => { self.permit_fut = None; Poll::Ready(None) } }
+ }
+ 
+ pub fn available_permits(&self) -> usize {
+ self.semaphore.available_permits()
+ }
+ 
+ pub fn add_permits(&self, n: usize) {
+ self.semaphore.add_permits(n);
+ }
+ 
+}
+
+impl Stream for PollSemaphore {
+ type Item = OwnedSemaphorePermit;
+ fn poll_next(self, cx: &mut Context<'_>) -> Poll<Option<OwnedSemaphorePermit>> {
+ Pin::into_inner(self).poll_acquire(cx)
+ }
+ 
+}
+
+impl Clone for PollSemaphore {
+ fn clone(&self) -> PollSemaphore {
+ PollSemaphore::new(self.clone_inner())
+ }
+ 
+}
+
+impl fmt::Debug for PollSemaphore {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("PollSemaphore").field("semaphore", &self.semaphore).finish()
+ }
+ 
+}
+
+impl AsRef<Semaphore> for PollSemaphore {
+ fn as_ref(&self) -> &Semaphore {
+ &self.semaphore
+ }
+ 
+}
+

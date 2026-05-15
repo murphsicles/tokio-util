@@ -1,0 +1,15 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/future.rs
+
+mod with_cancellation_token;
+use with_cancellation_token::{ WithCancellationTokenFuture, WithCancellationTokenFutureOwned };
+use std::future::Future;
+use crate::sync::CancellationToken;
+/// A trait which contains a variety of convenient adapters and utilities for `Future`s.
+pub trait FutureExt {
+ fn with_cancellation_token(self, cancellation_token: &CancellationToken) -> WithCancellationTokenFuture<'_, Self> where Self: Sized;
+ fn with_cancellation_token_owned(self, cancellation_token: CancellationToken) -> WithCancellationTokenFutureOwned<Self> where Self: Sized
+}
+
+impl<T: Future + Sized> FutureExt for T {
+}
+

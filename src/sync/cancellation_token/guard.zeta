@@ -1,0 +1,26 @@
+// Auto-converted from /tmp/df-tokio-util-0.7.18/tokio-util-0.7.18/src/sync/cancellation_token/guard.rs
+
+use crate::sync::CancellationToken;
+/// A wrapper for cancellation token which automatically cancels
+/// it on drop. It is created using [`drop_guard`] method on the [`CancellationToken`].
+/// 
+/// [`drop_guard`]: CancellationToken::drop_guard
+#[derive(Debug)]
+pub struct DropGuard {
+ inner: Option<CancellationToken>,
+}
+
+impl DropGuard {
+ pub fn disarm(self) -> CancellationToken {
+ self.inner.take().expect("`inner` can be only None in a destructor")
+ }
+ 
+}
+
+impl Drop for DropGuard {
+ fn drop(&mut self) {
+ if let Some(inner) = &self.inner { inner.cancel(); }
+ }
+ 
+}
+
